@@ -1,0 +1,270 @@
+---
+title: "Predicting DFS NBA Scores with XGBoost in R - Tutorial #1"
+author: "RSH / QS3"
+date: "2/14/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+This is a brief tutorial and example of using Extreme Gradient Boosting using XGBoost in R. What we are trying to do is predict daily fantasy scores (Draft Kings Scoring) for NBA players based on historical data. 
+
+Please test out the python webscraper I developed at https://github.com/ronaldsholt/NBA_auto_web_scrape to easily pull historical data from Fantasy Cruncher's Line Up Rewind.  
+
+For more details on XGBoost take a look the the docs here: https://cran.r-project.org/web/packages/xgboost/vignettes/xgboostPresentation.html
+
+
+``` {r, message=FALSE, warning=FALSE}
+library(readr)
+sample_data <- read_delim("~/Desktop/DS_Modeling_Project/Fantasy_NBA/combined_nba_data.csv", 
+                         ",", escape_double = FALSE, trim_ws = TRUE)
+#View(train_data)
+
+train_data <- na.omit(sample_data)
+
+library(dplyr)
+library(car)
+library(xgboost)
+```
+
+####Data Wrangling & Pre-Processing
+
+1. On Fantasy Crunchers application there are several fields that need to be removed in this example. 
+
+``` {r, message=FALSE, warning=FALSE}
+#create a new dataframe removing the features below... 
+f.c <- within(train_data, rm(`Proj Mins`, `My Proj`, Exposure, `FC Proj`, Value))
+```
+
+Next we will spilt up our data randomly using the package CaTools. We want to split our data into a training set to train our model, and a testing set that we will test our model.
+
+``` {r, message=FALSE, warning=FALSE}
+# split the data up randomly into training and test data
+require(caTools)
+set.seed(1131) #set a random see to be able to re-generate the split sections
+sample = sample.split(f.c, SplitRatio = .80)
+train = subset(f.c, sample == TRUE)
+test  = subset(f.c, sample == FALSE)
+```
+
+In this example, we will not label-encode or use one-hot coding to encode our categoricals. Instead, use the str() function to list the variables in the data. We will remove the variables that are catogoricals (the first 7 if you downloaded from FC).  
+
+``` {r, message=FALSE, warning=FALSE}
+str(train)
+```
+
+``` {r, message=FALSE, warning=FALSE}
+name = test$Player
+train <- train[, -(1:7)] #remove non_numericals from the training set. 
+test <- test[, -(1:7)]   #remove non_numericals from the testing set. 
+
+head(train)
+head(test)
+```
+
+#### Setting up XGBoost parameters 
+
+We want to use the boosting model for a regression problem. The model feeds in a data.matrix for your data, where the train[-12] is the position of the 'Score' for which we are calculating. A good source for general parameter setting is https://www.analyticsvidhya.com/blog/2016/03/complete-guide-parameter-tuning-xgboost-with-codes-python/
+
+    Booster = 'gbtree'
+
+    Objective = 'reg:linear'  - This defines the loss function to be minimized.
+
+    max.depth <- This is the maximum number of trees to be used. Typically values 3 - 10. 
+
+    nrounds <- The number of iterations that will be run using the model. 
+
+    eval_metric = "rmse"  - Root mean squared error, default for a regression.
+
+    eta <- This parameter is synonymous with 'learning rate'. 
+
+    colsample_bytree <- Denotes the fraction of columns to be randomly samples for each tree (0 - 1).
+
+    seed <- This is our random seed for reproducing results. 
+
+    verbose = 1 - This parm prints our the eval_metrics for each round. 
+
+    print_every_n = The frequency that verbose prints. Helps consolidate space for writing. 
+                      
+
+Here I have limited nrounds to 100, but you can play around with these parameters.
+``` {r, message=FALSE, warning=FALSE}
+model_xgb1 <- xgboost(data.matrix(train[,-12]),
+                      label=data.matrix(train[,12]),
+                      booster = "gbtree",
+                      objective="reg:linear",
+                      nrounds=100,
+                      max.depth=6,
+                      eta=0.01,
+                      colsample_bytree=0.8,
+                      seed=235,
+                      eval_metric="rmse",
+                      eval_metric="mae",
+                      eval_metric="logloss",
+                      #alpha=0.1,
+                      verbose = 1,
+                      print_every_n = 250)
+```
+
+The next step is to run your test data through the trained model using the predict() function. 
+
+``` {r, message=FALSE, warning=FALSE}
+test_xgb1 <- predict(model_xgb1, data.matrix(test))
+```
+Next, we will look at a few quick metrics of our model. 
+
+1. Looking at feature importance will help us better understand our data set. These will come in handy later when we dig deeper into our dataset.
+
+``` {r, message=FALSE, warning=FALSE}
+xgb_imp_freq <- xgb.importance(feature_names = colnames(train), model = model_xgb1)
+xgb.plot.importance(xgb_imp_freq)
+print(xgb_imp_freq)
+```
+
+
+2.  A quick check that I would run just for a visual of how your trainde model was predicting test values is running a linear regression on you predicted labels to your test labels. 
+
+Plotting the Score from our testing set acts as a quick validation method. the tighter the fit between out predicted values (test_xgb1) and our actual Y values in our test (test$Score) the better our model is at predicting. 
+
+``` {r, message=FALSE, warning=FALSE}
+
+actual <- test$Score      # y validation set
+plot(test_xgb1 ~ actual)  #test_xgb1 are the y_predicted values from the XBG model
+abline(lm(test_xgb1 ~ actual))
+
+```
+
+As you can see our model is positively trending, however, it looks likes we need to do some more work... Let's try adding our categoricals to see if the model improves. 
+
+
+
+#### Feature Engineering 
+
+In this next part we will introduce our categoricals variables using one-hot encoding. We will evaluate if the model gets better when utilizing these variables. We will utilize one-hot encoding to encode our catagoricals. 
+
+``` {r, message=FALSE, warning=FALSE}
+sample_data_2 <- read_delim("~/Desktop/DS_Modeling_Project/Fantasy_NBA/combined_nba_data.csv", 
+                          ",", escape_double = FALSE, trim_ws = TRUE)
+
+train_data_2 <- na.omit(sample_data_2)
+```
+
+Here I am just re-adding the data like we did above. 
+``` {r, message=FALSE, warning=FALSE}
+#create a new dataframe removing the features below... 
+f.c.2 <- within(train_data_2, rm(`Proj Mins`, `My Proj`, Exposure, `FC Proj`, Value))
+
+f.c.2 <- filter(f.c.2, f.c.2$Score >= 10)
+f.c.2 <- f.c.2[, -(1:6)]
+
+# In this example we are only one-hot encoding the 'Def v Pos' or Defense verse the position.
+ohe_feats = c('Def v Pos')
+```
+
+Here we call dummyVars from the package caret. Using this method we create the dummy variables and merge them back to the origional dataframe. 
+
+``` {r, message=FALSE, warning=FALSE}
+library(caret)
+dummies <- dummyVars(~ `Def v Pos`, data = f.c.2)
+df_all_ohe <- as.data.frame(predict(dummies, newdata = f.c.2))
+df_all_combined <- cbind(f.c.2[,-c(which(colnames(f.c.2) %in% ohe_feats))], df_all_ohe)
+```
+
+Next we are going to re-split our training and testing groups up...
+
+``` {r, message=FALSE, warning=FALSE}
+require(caTools)
+set.seed(1131) #set a random see to be able to re-generate the split sections
+sample = sample.split(df_all_combined, SplitRatio = .80)
+train = subset(df_all_combined, sample == TRUE)
+test  = subset(df_all_combined, sample == FALSE)
+```
+
+```{r, message=FALSE, warning=FALSE}
+head(train) #Notice the one-hot encoded variables...
+```
+
+We are going to use the same XGBoost model as before. Note in other examples and real-world problems you may want to spend a lot of time configuring the parameters to optimize your model. This resource was very helpful for me https://www.analyticsvidhya.com/blog/2016/03/complete-guide-parameter-tuning-xgboost-with-codes-python/
+
+Note: for this markdown, I limited the nrounds to save resources. 
+``` {r, message=FALSE, warning=FALSE}
+model_xgb1 <- xgboost(data.matrix(train[,-12]),
+                      label=data.matrix(train[,12]),
+                      booster = "gbtree",
+                      objective="reg:linear",
+                      nrounds=100,
+                      max.depth=3,
+                      eta=0.05,
+                      colsample_bytree=0.8,
+                      seed=235,
+                      eval_metric="rmse",
+                      eval_metric = "error", 
+                      alpha=0.1,
+                      verbose = 1,
+                      print_every_n = 100)
+```
+
+Run the prediction... 
+
+``` {r, message=FALSE, warning=FALSE}
+test_xgb1 <- predict(model_xgb1, data.matrix(test))
+```
+
+Let's take a quick look again with our plot... 
+
+``` {r, message=FALSE, warning=FALSE}
+actual <- test$Score
+plot(test_xgb1 ~ actual)
+abline(lm(test_xgb1 ~ actual))
+```
+
+
+``` {r, message=FALSE, warning=FALSE}
+#xgb_imp_freq <- xgb.importance(feature_names = colnames(train), model = model_xgb1)
+#xgb.plot.importance(xgb_imp_freq)
+#print(xgb_imp_freq)
+
+```
+#### Next Steps
+
+As you can see, adding Defense verse the position did not really improve our model, however, it gives you a decent idea of how to get XGBboost set up in R and running. There are a ton of parameter tuning, feature selection techniques, and other good stuff that we did not cover in this tutorial. What we will do in the next tutorial is go into a deeper dive of the exploratory space, and also explore some of the more complex ideas with XGBoost. 
+
+
+I hope this tutorial gave you just enough code "to break something". 
+
+
+
+
+
+
+``` {r, message=FALSE, warning=FALSE}
+
+```
+
+``` {r, message=FALSE, warning=FALSE}
+
+```
+
+``` {r, message=FALSE, warning=FALSE}
+
+```
+
+``` {r, message=FALSE, warning=FALSE}
+
+```
+
+``` {r, message=FALSE, warning=FALSE}
+
+```
+
+``` {r, message=FALSE, warning=FALSE}
+
+```
+
+``` {r, message=FALSE, warning=FALSE}
+
+```
+
+
+
